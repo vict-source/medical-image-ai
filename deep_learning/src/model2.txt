@@ -1,0 +1,41 @@
+import torch
+import torch.nn as nn
+from torchvision import models
+
+
+NUM_CLASSES = 3
+
+
+def create_model():
+    model = models.resnet18(
+        weights=models.ResNet18_Weights.DEFAULT
+    )
+
+    # Freeze the pretrained feature extractor
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+
+    # Replace the classification head
+    input_features = model.fc.in_features
+
+    model.fc = nn.Sequential(
+        nn.Dropout(p=0.3),
+        nn.Linear(input_features, NUM_CLASSES),
+    )
+
+    return model
+
+
+if __name__ == "__main__":
+    model = create_model()
+
+    print(model)
+    print("\nTrainable parameters:")
+
+    trainable = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+
+    print(trainable)
