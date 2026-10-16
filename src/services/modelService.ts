@@ -1,4 +1,5 @@
 import * as ort from "onnxruntime-web"
+import type { AnalysisResult, PredictionResult } from "../types/medical"
 
 let session: ort.InferenceSession | null = null
 
@@ -10,15 +11,11 @@ export const CLASS_LABELS = [
 ]
 
 async function loadModel(): Promise<ort.InferenceSession> {
-  if (session) {
-    return session
-  }
+  if (session) return session
 
   console.log("Loading ONNX model...")
 
-  session = await ort.InferenceSession.create(
-    MODEL_PATH
-  )
+  session = await ort.InferenceSession.create(MODEL_PATH)
 
   console.log("ONNX model loaded successfully")
   console.log("Input:", session.inputNames)
@@ -27,12 +24,8 @@ async function loadModel(): Promise<ort.InferenceSession> {
   return session
 }
 
-async function imageToTensor(
-  file: File
-): Promise<ort.Tensor> {
-
+async function imageToTensor(file: File): Promise<ort.Tensor> {
   const image = await createImageBitmap(file)
-
   const canvas = document.createElement("canvas")
 
   canvas.width = 224
@@ -41,157 +34,86 @@ async function imageToTensor(
   const context = canvas.getContext("2d")
 
   if (!context) {
-    throw new Error(
-      "Unable to create image canvas"
-    )
+    image.close()
+    throw new Error("Unable to create image canvas")
   }
 
-  context.drawImage(
-    image,
-    0,
-    0,
-    224,
-    224
-  )
+  try {
+    context.drawImage(image, 0, 0, 224, 224)
 
-  const imageData =
-    context.getImageData(
-      0,
-      0,
-      224,
-      224
-    )
+    const imageData = context.getImageData(0, 0, 224, 224)
+    const pixelCount = 224 * 224
+    const input = new Float32Array(3 * pixelCount)
 
-  const pixelCount = 224 * 224
+    const mean = [0.485, 0.456, 0.406]
+    const std = [0.229, 0.224, 0.225]
 
-  const input =
-    new Float32Array(
-      3 * pixelCount
-    )
+    for (let i = 0; i < pixelCount; i++) {
+      const offset = i * 4
 
-  // ImageNet normalization.
-  // This matches the preprocessing used
-  // during model training.
+      const r = imageData.data[offset] / 255
+      const g = imageData.data[offset + 1] / 255
+      const b = imageData.data[offset + 2] / 255
 
-  const mean = [
-    0.485,
-    0.456,
-    0.406,
-  ]
+      input[i] = (r - mean[0]) / std[0]
+      input[pixelCount + i] = (g - mean[1]) / std[1]
+      input[2 * pixelCount + i] = (b - mean[2]) / std[2]
+    }
 
-  const std = [
-    0.229,
-    0.224,
-    0.225,
-  ]
-
-  for (let i = 0; i < pixelCount; i++) {
-
-    const offset = i * 4
-
-    const r =
-      imageData.data[offset] / 255
-
-    const g =
-      imageData.data[offset + 1] / 255
-
-    const b =
-      imageData.data[offset + 2] / 255
-
-    input[i] =
-      (r - mean[0]) / std[0]
-
-    input[pixelCount + i] =
-      (g - mean[1]) / std[1]
-
-    input[pixelCount * 2 + i] =
-      (b - mean[2]) / std[2]
+    return new ort.Tensor("float32", input, [1, 3, 224, 224])
+  } finally {
+    image.close()
   }
-
-  return new ort.Tensor(
-    "float32",
-    input,
-    [1, 3, 224, 224]
-  )
 }
 
+function softmax(logits: number[]): number[] {
+  const maxLogit = Math.max(...logits)
 
-// =========================
-// SOFTMAX
-// =========================
-
-function softmax(
-  logits: number[]
-): number[] {
-
-  const maxLogit =
-    Math.max(...logits)
-
-  const exponentials =
-    logits.map(
-      (value) =>
-        Math.exp(value - maxLogit)
-    )
-
-  const sum =
-    exponentials.reduce(
-      (total, value) =>
-        total + value,
-      0
-    )
-
-  return exponentials.map(
-    (value) =>
-      value / sum
+  const exponentials = logits.map(
+    value => Math.exp(value - maxLogit)
   )
+
+  const sum = exponentials.reduce(
+    (total, value) => total + value,
+    0
+  )
+
+  return exponentials.map(value => value / sum)
 }
-
-
-// =========================
-// ANALYZE IMAGE
-// =========================
 
 export async function analyzeImage(
   file: File
-): Promise<number[]> {
+): Promise<AnalysisResult> {
+  const model = await loadModel()
+  const tensor = await imageToTensor(file)
 
-  const model =
-    await loadModel()
+  const inputName = model.inputNames[0]
 
-  const tensor =
-    await imageToTensor(file)
+  const output = await model.run({
+    [inputName]: tensor,
+  })
 
-  const inputName =
-    model.inputNames[0]
+  const outputName = model.outputNames[0]
+  const result = output[outputName]
 
-  const output =
-    await model.run({
-      [inputName]: tensor,
-    })
+  const logits = Array.from(result.data as Float32Array)
+  const probabilities = softmax(logits)
 
-  const outputName =
-    model.outputNames[0]
-
-  const result =
-    output[outputName]
-
-  const logits =
-    Array.from(
-      result.data as Float32Array
+  if (probabilities.length !== CLASS_LABELS.length) {
+    throw new Error(
+      `Expected ${CLASS_LABELS.length} class scores, received ${probabilities.length}.`
     )
+  }
 
-  console.log(
-    "Raw model logits:",
-    logits
-  )
+  const predictions: PredictionResult[] = CLASS_LABELS.map(
+    (label, index) => ({
+      label,
+      confidence: probabilities[index],
+    })
+  ).sort((a, b) => b.confidence - a.confidence)
 
-  const probabilities =
-    softmax(logits)
-
-  console.log(
-    "Model probabilities:",
-    probabilities
-  )
-
-  return probabilities
+  return {
+    topPrediction: predictions[0],
+    predictions,
+  }
 }
